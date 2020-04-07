@@ -5,9 +5,21 @@ set -eo pipefail
 [[ -n $DEBUG ]] && set -x
 INSECURE=${INSECURE:-false}
 
-USER_NAME=${USER_NAME:-kube-admin-user}
+if ! [ -x "$(command -v openssl)" ]; then
+    echo 'Error: openssl is not installed.' >&2
+    exit 1
+fi
+
+if ! [ -x "$(command -v kubectl)" ]; then
+    echo 'Error: kubectl is not installed.' >&2
+    exit 1
+fi
+
+DEFAULT_CLUSTER=$(kubectl config view -o=jsonpath="{.contexts[?(@.name=='$(kubectl config current-context)')].context.cluster}")
+
+USER_NAME=${USER_NAME:-kube-admin}
 NAMESPACE=${NAMESPACE:-default}
-CLUSTER_NAME=${CLUSTER:-kubernetes}
+CLUSTER=${CLUSTER:-${DEFAULT_CLUSTER}}
 
 usage(){
     echo "Usage:"
@@ -25,22 +37,12 @@ usage(){
     echo ""
     echo "Environment variables:"
     echo ""
-    echo "  \$USER_NAME   Set the user name to use for RBAC, this will be the user provided with auth access. Default: 'cluster-admin-user'. (optional)"
+    echo "  \$USER_NAME   Set the user name to use for RBAC, this will be the user provided with auth access. Default: 'cluster-admin'. (optional)"
     echo "  \$NAMESPACE   Set the namespace that will be used as the default kubeconfig context. Default: 'default'. (optional)"
-    echo "  \$CLUSTER     Set cluster name to use, this should match what is in your kubeconfig. Default: 'kubernetes'. (optional)"
+    echo "  \$CLUSTER     Set cluster name to use, this should match what is in your kubeconfig. Default to using current-context. (optional)"
     echo "  \$INSECURE    Enable TLS insecure-skip-tls-verify. Default: false (optional)"
     echo "  \$DEBUG       Set logging to verbose. (optional)"
 }
-
-if ! [ -x "$(command -v openssl)" ]; then
-    echo 'Error: openssl is not installed.' >&2
-    exit 1
-fi
-
-if ! [ -x "$(command -v kubectl)" ]; then
-    echo 'Error: kubectl is not installed.' >&2
-    exit 1
-fi
 
 all() {
     create
@@ -54,7 +56,7 @@ config() {
     # After CSR is approved it takes a few seconds to update the resources
     sleep 2
     kubectl get csr access-request -o jsonpath='{.status.certificate}' | base64 --decode > client.pem
-    kubectl config view -o=jsonpath="{.clusters[?(@.name=='${CLUSTER_NAME}')].cluster.certificate-authority-data}" --raw | base64 --decode - > ca.pem
+    kubectl config view -o=jsonpath="{.clusters[?(@.name=='${CLUSTER}')].cluster.certificate-authority-data}" --raw | base64 --decode - > ca.pem
 }
 
 create() {
@@ -73,22 +75,17 @@ approve() {
     kubectl certificate approve access-request
 }
 
-create_kubeconfig() {
-    config
-    generate_kubeconfig
-}
-
 generate_kubeconfig() {
     # TODO: Resolve DNS without cert signed issue.
     if [[ $INSECURE == "true" ]]; then
-        kubectl config set-cluster "$(kubectl config view -o jsonpath='{.clusters[0].name}')" \
+        kubectl config set-cluster "$(kubectl config view -o jsonpath="{.clusters[?(@.name=='${CLUSTER}')].name}")" \
             --server="https://api-server.raspbernetes.com" \
             --insecure-skip-tls-verify \
             --kubeconfig=kube.conf
     else
-        kubectl config set-cluster "${CLUSTER_NAME}" \
-            --server="$(kubectl config view -o jsonpath="{.clusters[?(@.name=='${CLUSTER_NAME}')].cluster.server}")" \
-            --certificate-authority=ca.pem \
+        kubectl config set-cluster "${CLUSTER}" \
+            --server="$(kubectl config view -o jsonpath="{.clusters[?(@.name=='${CLUSTER}')].cluster.server}")" \
+            --certificate-authority=raspbernetes.pem \
             --kubeconfig=kube.conf \
             --embed-certs
     fi
@@ -97,12 +94,12 @@ generate_kubeconfig() {
         --client-key=key.pem \
         --kubeconfig=kube.conf \
         --embed-certs
-    kubectl config set-context "${USER_NAME}@${CLUSTER_NAME}" \
-        --cluster="${CLUSTER_NAME}" \
+    kubectl config set-context "${USER_NAME}@${CLUSTER}" \
+        --cluster="${CLUSTER}" \
         --user="${USER_NAME}" \
         --namespace="${NAMESPACE}" \
         --kubeconfig=kube.conf
-    kubectl config use-context "${USER_NAME}@${CLUSTER_NAME}" \
+    kubectl config use-context "${USER_NAME}@${CLUSTER}" \
         --kubeconfig=kube.conf
 }
 
@@ -122,7 +119,11 @@ print_kubeconfig() {
 
 set_rbac_permissions() {
     echo "Setting admin permissions for user: ${USER_NAME}"
-    kubectl create clusterrolebinding "${USER_NAME}" --namespace="${NAMESPACE}" --clusterrole=cluster-admin --user="${USER_NAME}"
+    if [[ $INSECURE == "true" ]]; then
+        kubectl create clusterrolebinding cluster-system-anonymous --clusterrole=cluster-admin --user=system:anonymous
+    else
+        kubectl create clusterrolebinding "${USER_NAME}" --namespace="${NAMESPACE}" --clusterrole=cluster-admin --user="${USER_NAME}"
+    fi
 }
 
 delete() {
@@ -130,7 +131,7 @@ delete() {
     rm -f "${USER_NAME}.csr" key.pem csr.yaml ca.pem kube.conf client.pem csr.conf
     echo "Delete Kubernetes resources"
     kubectl delete csr access-request
-    kubectl delete clusterrolebinding "${USER_NAME}"
+    kubectl delete clusterrolebinding "${USER_NAME}" cluster-system-anonymous
 }
 
 case "${1:-}" in
@@ -144,7 +145,7 @@ case "${1:-}" in
         approve
         ;;
     kubeconfig|k)
-        create_kubeconfig
+        generate_kubeconfig
         ;;
     show|s)
         print_kubeconfig
