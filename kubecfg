@@ -79,13 +79,13 @@ generate_kubeconfig() {
     # TODO: Resolve DNS without cert signed issue.
     if [[ $INSECURE == "true" ]]; then
         kubectl config set-cluster "$(kubectl config view -o jsonpath="{.clusters[?(@.name=='${CLUSTER}')].name}")" \
-            --server="https://api-server.raspbernetes.com" \
+            --server="https://192.168.1.200:6443" \
             --insecure-skip-tls-verify \
             --kubeconfig=kube.conf
     else
         kubectl config set-cluster "${CLUSTER}" \
             --server="$(kubectl config view -o jsonpath="{.clusters[?(@.name=='${CLUSTER}')].cluster.server}")" \
-            --certificate-authority=raspbernetes.pem \
+            --certificate-authority=ca.pem \
             --kubeconfig=kube.conf \
             --embed-certs
     fi
@@ -120,9 +120,9 @@ print_kubeconfig() {
 set_rbac_permissions() {
     echo "Setting admin permissions for user: ${USER_NAME}"
     if [[ $INSECURE == "true" ]]; then
-        kubectl create clusterrolebinding cluster-system-anonymous --clusterrole=cluster-admin --user=system:anonymous
+        kubectl create clusterrolebinding cluster-system-anonymous --clusterrole=view --user=system:anonymous
     else
-        kubectl create clusterrolebinding "${USER_NAME}" --namespace="${NAMESPACE}" --clusterrole=cluster-admin --user="${USER_NAME}"
+        kubectl create clusterrolebinding "${USER_NAME}" --namespace="${NAMESPACE}" --clusterrole=view --user="${USER_NAME}"
     fi
 }
 
