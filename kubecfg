@@ -72,7 +72,7 @@ create() {
 approve() {
     echo "Approving certificate signing request"
     kubectl apply -f csr.yaml
-    kubectl certificate approve access-request
+    kubectl certificate approve -f csr.yaml
 }
 
 generate_kubeconfig() {
